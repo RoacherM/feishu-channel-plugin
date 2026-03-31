@@ -199,10 +199,17 @@ function loadAccess(): Access {
   return BOOT_ACCESS ?? readAccessFile()
 }
 
+// In Feishu, DM chat_id (oc_xxx) differs from user open_id (ou_xxx).
+// Cache the mapping so outbound reply can validate against the allowlist.
+const chatToSender = new Map<string, string>()
+
 function assertAllowedChat(id: string): void {
   const access = loadAccess()
   if (access.allowFrom.includes(id)) return
   if (id in access.groups) return
+  // Check if this chat_id maps to an allowed open_id
+  const sender = chatToSender.get(id)
+  if (sender && access.allowFrom.includes(sender)) return
   throw new Error(`chat/user ${id} is not allowlisted — add via /feishu:access`)
 }
 
@@ -728,8 +735,9 @@ function shutdown(): void {
   shuttingDown = true
   process.stderr.write('feishu channel: shutting down\n')
   setTimeout(() => process.exit(0), 2000)
-  try { wsClient.close({ force: true }) } catch {}
-  process.exit(0)
+  void Promise.resolve().then(() => {
+    try { wsClient.close({ force: true }) } catch {}
+  }).finally(() => process.exit(0))
 }
 process.stdin.on('end', shutdown)
 process.stdin.on('close', shutdown)
@@ -763,6 +771,9 @@ async function handleInbound(
   attachment?: AttachmentMeta,
   mentions?: Array<{ key: string; id: { open_id?: string } }>,
 ): Promise<void> {
+  // Cache chat_id → open_id mapping for outbound access checks
+  chatToSender.set(chatId, senderOpenId)
+
   const result = gate(senderOpenId, chatId, chatType)
 
   if (result.action === 'drop') return

@@ -993,3 +993,8 @@ wsClient.start({
 })
 
 process.stderr.write(`feishu channel: WSClient started, listening for events\n`)
+
+// Keepalive — WSClient's WebSocket alone may not keep the event loop alive
+// if the connection drops. This interval ensures the process stays running
+// as long as Claude Code holds stdin open.
+setInterval(() => {}, 30_000)

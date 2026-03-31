@@ -60,6 +60,16 @@ if (!APP_ID || !APP_SECRET) {
   process.exit(1)
 }
 
+// Redirect console.log/info/warn/error to stderr — the Feishu SDK uses
+// console.log internally (not the logger option) for some messages like
+// "event-dispatch is ready". Any stdout output corrupts MCP JSON-RPC.
+const _origLog = console.log
+const _origInfo = console.info
+const _origWarn = console.warn
+console.log = (...args: any[]) => process.stderr.write(args.map(String).join(' ') + '\n')
+console.info = (...args: any[]) => process.stderr.write(args.map(String).join(' ') + '\n')
+console.warn = (...args: any[]) => process.stderr.write(args.map(String).join(' ') + '\n')
+
 process.on('unhandledRejection', err => {
   process.stderr.write(`feishu channel: unhandled rejection: ${err}\n`)
 })
@@ -71,13 +81,27 @@ process.on('uncaughtException', err => {
 // Feishu SDK clients
 // ---------------------------------------------------------------------------
 
+// Custom logger that writes to stderr — the default logger writes to stdout,
+// which corrupts the MCP stdio transport (JSON-RPC over stdin/stdout).
+const stderrLogger = {
+  fatal: (...args: any[]) => process.stderr.write(`[fatal] ${args.map(String).join(' ')}\n`),
+  error: (...args: any[]) => process.stderr.write(`[error] ${args.map(String).join(' ')}\n`),
+  warn: (...args: any[]) => process.stderr.write(`[warn] ${args.map(String).join(' ')}\n`),
+  info: (..._args: any[]) => {},   // suppress — too noisy for MCP
+  debug: (..._args: any[]) => {},
+  trace: (..._args: any[]) => {},
+  // Some SDK internals call log() directly
+  log: (..._args: any[]) => {},
+}
+
 const larkDomain = DOMAIN.includes('larksuite') ? lark.Domain.Lark : lark.Domain.Feishu
 
 const client = new lark.Client({
   appId: APP_ID,
   appSecret: APP_SECRET,
   domain: larkDomain,
-  loggerLevel: lark.LoggerLevel.warn,
+  loggerLevel: lark.LoggerLevel.error,
+  logger: stderrLogger as any,
 })
 
 // Bot's open_id — populated after first message received
@@ -832,7 +856,8 @@ const wsClient = new lark.WSClient({
   appId: APP_ID,
   appSecret: APP_SECRET,
   domain: larkDomain,
-  loggerLevel: lark.LoggerLevel.warn,
+  loggerLevel: lark.LoggerLevel.error,
+  logger: stderrLogger as any,
 })
 
 wsClient.start({

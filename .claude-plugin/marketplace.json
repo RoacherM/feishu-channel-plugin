@@ -1,0 +1,18 @@
+{
+  "name": "local-feishu",
+  "description": "Local marketplace for feishu channel plugin",
+  "owner": {
+    "name": "Byron Wayne"
+  },
+  "plugins": [
+    {
+      "name": "feishu",
+      "description": "Feishu/Lark channel for Claude Code — messaging bridge with built-in access control",
+      "version": "0.1.0",
+      "source": "./",
+      "author": {
+        "name": "Byron Wayne"
+      }
+    }
+  ]
+}

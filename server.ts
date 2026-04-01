@@ -104,8 +104,28 @@ const client = new lark.Client({
   logger: stderrLogger as any,
 })
 
-// Bot's open_id — populated after first message received
+// Bot's open_id — fetched at startup for group mention detection
 let botOpenId = ''
+
+async function fetchBotOpenId(): Promise<void> {
+  try {
+    const resp = await client.request<{
+      code: number
+      bot?: { open_id?: string; app_name?: string }
+    }>({
+      method: 'GET',
+      url: `${DOMAIN}/open-apis/bot/v3/info/`,
+    })
+    if (resp?.bot?.open_id) {
+      botOpenId = resp.bot.open_id
+      process.stderr.write(`feishu channel: bot open_id = ${botOpenId}\n`)
+    } else {
+      process.stderr.write(`feishu channel: bot info response missing open_id: ${JSON.stringify(resp)}\n`)
+    }
+  } catch (err) {
+    process.stderr.write(`feishu channel: failed to fetch bot info (group mention detection may not work): ${err}\n`)
+  }
+}
 
 // ---------------------------------------------------------------------------
 // Permission reply pattern (same as Telegram plugin)
@@ -278,8 +298,15 @@ function gate(senderOpenId: string, chatId: string, chatType: string): GateResul
   }
 
   if (chatType === 'group') {
-    const policy = access.groups[chatId]
-    if (!policy) return { action: 'drop' }
+    let policy = access.groups[chatId]
+    if (!policy) {
+      // Accept new groups automatically so users don't need to discover chat_ids manually.
+      // Conservative: requireMention=true prevents the bot from responding to every message.
+      policy = { requireMention: true, allowFrom: [] }
+      access.groups[chatId] = policy
+      saveAccess(access)
+      process.stderr.write(`feishu channel: auto-registered group ${chatId} (requireMention=true)\n`)
+    }
     const groupAllowFrom = policy.allowFrom ?? []
     if (groupAllowFrom.length > 0 && !groupAllowFrom.includes(senderOpenId)) {
       return { action: 'drop' }
@@ -870,6 +897,9 @@ const wsClient = new lark.WSClient({
   loggerLevel: lark.LoggerLevel.error,
   logger: stderrLogger as any,
 })
+
+// Must complete before accepting events — otherwise mention detection fails on early messages
+await fetchBotOpenId()
 
 wsClient.start({
   eventDispatcher: new lark.EventDispatcher({}).register({

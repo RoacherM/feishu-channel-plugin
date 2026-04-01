@@ -708,15 +708,26 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
         const fileKey = args.file_key as string
         const resourceType = (args.type as string | undefined) ?? 'image'
 
-        const resp = await client.im.messageResource.get({
-          params: { type: resourceType },
-          path: { message_id: messageId, file_key: fileKey },
+        // Use fetch + buffer instead of SDK's stream-based writeFile()
+        // to avoid "socket connection closed unexpectedly" errors caused by
+        // missing error handlers on the readable stream in the Lark SDK.
+        const tokenResp = await client.request<{ code: number; tenant_access_token: string }>({
+          url: `${larkDomain}/open-apis/auth/v3/tenant_access_token/internal`,
+          method: 'POST',
+          data: { app_id: APP_ID, app_secret: APP_SECRET },
         })
+        const token = tokenResp.tenant_access_token
+        const dlUrl = `${larkDomain}/open-apis/im/v1/messages/${messageId}/resources/${fileKey}?type=${resourceType}`
+        const dlResp = await fetch(dlUrl, {
+          headers: { Authorization: `Bearer ${token}` },
+        })
+        if (!dlResp.ok) throw new Error(`download failed: HTTP ${dlResp.status} ${await dlResp.text()}`)
+        const buf = Buffer.from(await dlResp.arrayBuffer())
 
         const ext = resourceType === 'image' ? 'png' : 'bin'
         const path = join(INBOX_DIR, `${Date.now()}-${fileKey.slice(0, 16)}.${ext}`)
         mkdirSync(INBOX_DIR, { recursive: true })
-        await resp.writeFile(path)
+        writeFileSync(path, buf)
         return { content: [{ type: 'text', text: path }] }
       }
 

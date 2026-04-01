@@ -1,6 +1,6 @@
 {
   "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
-  "name": "feishu-channel",
+  "name": "local-feishu",
   "description": "Feishu/Lark channel plugin for Claude Code",
   "owner": {
     "name": "Byron Wayne"

@@ -36,7 +36,7 @@ This saves credentials to `~/.claude/channels/feishu/.env`.
 Start Claude Code with the Feishu channel:
 
 ```bash
-claude --channels plugin:feishu@feishu-plugin --dangerously-load-development-channels
+claude --dangerously-load-development-channels plugin:feishu@feishu-plugin
 ```
 
 Then DM your bot on Feishu — messages will be forwarded to the Claude Code session.

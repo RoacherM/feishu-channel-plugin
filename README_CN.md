@@ -38,7 +38,7 @@
 启动带飞书 channel 的 Claude Code：
 
 ```bash
-claude --channels plugin:feishu@feishu-plugin --dangerously-load-development-channels
+claude --dangerously-load-development-channels plugin:feishu@feishu-plugin
 ```
 
 然后在飞书上给 bot 发私信，消息会转发到 Claude Code 会话中。

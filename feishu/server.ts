@@ -49,6 +49,37 @@ const APP_SECRET = process.env.FEISHU_APP_SECRET
 const DOMAIN = process.env.FEISHU_DOMAIN ?? 'https://open.feishu.cn'
 const STATIC = process.env.FEISHU_ACCESS_MODE === 'static'
 
+// ---------------------------------------------------------------------------
+// Kill stale instances — Feishu's WSClient round-robins events across all
+// WebSocket connections for the same App ID. Zombie processes steal events
+// but their MCP stdout pipe is dead, silently dropping messages.
+// ---------------------------------------------------------------------------
+
+const PID_FILE = join(STATE_DIR, 'server.pid')
+const PID_ENTRY = `${process.pid}:${Date.now()}`
+
+function isProcessAlive(pid: number): boolean {
+  try { process.kill(pid, 0); return true } catch { return false }
+}
+
+try {
+  mkdirSync(STATE_DIR, { recursive: true })
+  const raw = readFileSync(PID_FILE, 'utf8').trim()
+  const [pidStr, tsStr] = raw.split(':')
+  const oldPid = Number(pidStr)
+  const oldTs = Number(tsStr)
+  if (oldPid && oldPid !== process.pid && isProcessAlive(oldPid)) {
+    const age = Date.now() - oldTs
+    if (oldTs && age > 0 && age < 7 * 24 * 60 * 60 * 1000) {
+      process.kill(oldPid, 'SIGTERM')
+      process.stderr.write(`feishu channel: killed stale instance (pid ${oldPid}, age ${(age / 1000).toFixed(0)}s)\n`)
+    }
+  }
+} catch {}
+
+try { rmSync(PID_FILE) } catch {}
+writeFileSync(PID_FILE, PID_ENTRY, { flag: 'wx' })
+
 if (!APP_ID || !APP_SECRET) {
   process.stderr.write(
     `feishu channel: FEISHU_APP_ID and FEISHU_APP_SECRET required\n` +
@@ -834,6 +865,10 @@ function shutdown(): void {
   if (shuttingDown) return
   shuttingDown = true
   clearInterval(dedupCleanupInterval)
+  try {
+    const current = readFileSync(PID_FILE, 'utf8').trim()
+    if (current === PID_ENTRY) rmSync(PID_FILE)
+  } catch {}
   process.stderr.write('feishu channel: shutting down\n')
   setTimeout(() => process.exit(0), 2000)
   void Promise.resolve().then(() => {

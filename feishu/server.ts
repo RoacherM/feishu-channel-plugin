@@ -769,10 +769,13 @@ await mcp.connect(new StdioServerTransport())
 
 const deliveryChains = new Map<string, Promise<void>>()
 
-const deliveredMessages = new Set<string>()
+const deliveredMessages = new Map<string, number>()
 const DEDUP_TTL = 30 * 60_000
-setInterval(() => {
-  if (deliveredMessages.size > 500) deliveredMessages.clear()
+const dedupCleanupInterval = setInterval(() => {
+  const cutoff = Date.now() - DEDUP_TTL
+  for (const [key, ts] of deliveredMessages) {
+    if (ts < cutoff) deliveredMessages.delete(key)
+  }
 }, DEDUP_TTL)
 
 function enqueueDelivery(
@@ -782,7 +785,7 @@ function enqueueDelivery(
 ): void {
   const dedupKey = `${chatId}:${messageId}`
   if (messageId && deliveredMessages.has(dedupKey)) {
-    process.stderr.write(`feishu channel: dedup skip ${messageId}\n`)
+    process.stderr.write(`feishu channel: dedup skip ${messageId || '(no-id)'}\n`)
     return
   }
 
@@ -790,7 +793,7 @@ function enqueueDelivery(
   const next = prev.then(async () => {
     try {
       await mcp.notification(notification)
-      if (messageId) deliveredMessages.add(dedupKey)
+      if (messageId) deliveredMessages.set(dedupKey, Date.now())
       process.stderr.write(`feishu channel: delivered ${messageId || '(no-id)'}\n`)
     } catch (err) {
       process.stderr.write(`feishu channel: FAILED to deliver ${messageId || '(no-id)'}: ${err}\n`)
@@ -811,6 +814,7 @@ let shuttingDown = false
 function shutdown(): void {
   if (shuttingDown) return
   shuttingDown = true
+  clearInterval(dedupCleanupInterval)
   process.stderr.write('feishu channel: shutting down\n')
   setTimeout(() => process.exit(0), 2000)
   void Promise.resolve().then(() => {

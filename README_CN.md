@@ -65,6 +65,19 @@ claude --dangerously-load-development-channels plugin:feishu@feishu-plugin
 - **文件附件**：文档等文件自动处理
 - **权限中继**：工具权限请求转发到飞书供用户审批
 - **表情回应**：收到消息后自动添加确认表情
+- **僵尸进程清理**：启动时自动杀死旧实例，防止 WebSocket 事件被抢占
+- **投递队列**：按聊天串行投递，支持去重和重试
+
+## 升级
+
+```
+/feishu:upgrade           # 从 GitHub 拉取最新版 + 清理缓存
+/feishu:upgrade status    # 检查是否有可用更新
+```
+
+升级后需运行 `/plugin install feishu@feishu-plugin` 和 `/reload-plugins`。
+
+> **注意**：Claude Code 内置的 `/plugin update` 有[已知 bug](https://github.com/anthropics/claude-code/issues/37252)，不会在比较版本前拉取远端。请使用 `/feishu:upgrade` 代替。
 
 ## 项目结构
 
@@ -79,6 +92,7 @@ feishu/                   # 插件源码
   skills/
     access/SKILL.md       # /feishu:access 技能
     configure/SKILL.md    # /feishu:configure 技能
+    upgrade/SKILL.md      # /feishu:upgrade 技能
 ```
 
 ## 许可证

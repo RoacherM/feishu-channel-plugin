@@ -63,6 +63,19 @@ Manage who can reach your bot:
 - **File attachments**: Documents and other files are handled
 - **Permission relay**: Tool permission prompts forwarded to Feishu for approval
 - **Emoji reactions**: Acknowledgement reactions on received messages
+- **Stale process cleanup**: Automatically kills zombie instances on startup to prevent WebSocket event stealing
+- **Delivery queue**: Per-chat serialized delivery with dedup and retry
+
+## Updating
+
+```
+/feishu:upgrade           # Pull latest from GitHub + clear cache
+/feishu:upgrade status    # Check if updates are available
+```
+
+After upgrading, run `/plugin install feishu@feishu-plugin` then `/reload-plugins`.
+
+> **Note**: Claude Code's built-in `/plugin update` has a [known bug](https://github.com/anthropics/claude-code/issues/37252) that doesn't fetch the remote before comparing versions. Use `/feishu:upgrade` instead.
 
 ## Project Structure
 
@@ -77,6 +90,7 @@ feishu/                   # Plugin source
   skills/
     access/SKILL.md       # /feishu:access skill
     configure/SKILL.md    # /feishu:configure skill
+    upgrade/SKILL.md      # /feishu:upgrade skill
 ```
 
 ## License

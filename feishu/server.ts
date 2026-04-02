@@ -400,14 +400,14 @@ function chunk(text: string, limit: number, mode: 'length' | 'newline'): string[
 // Feishu emoji mapping — Feishu uses uppercase string IDs, not Unicode
 // ---------------------------------------------------------------------------
 
+// Only emoji types verified to work with Feishu's reaction API are included.
+// Unsupported types (EYES, FIRE, ROCKET, THUMBSDOWN, SCREAM, PRAY, CROSS,
+// HUNDRED, LIGHTNING, TROPHY, BROKENHEART) return 231001 "reaction type is invalid".
 const EMOJI_TO_FEISHU: Record<string, string> = {
-  '\u{1F44D}': 'THUMBSUP', '\u{1F44E}': 'THUMBSDOWN', '\u{2764}': 'HEART',
-  '\u{1F525}': 'FIRE', '\u{1F44F}': 'CLAP', '\u{1F389}': 'PARTY',
-  '\u{1F60A}': 'SMILE', '\u{1F914}': 'THINKING', '\u{1F631}': 'SCREAM',
-  '\u{1F622}': 'CRY', '\u{1F64F}': 'PRAY', '\u{1F440}': 'EYES',
-  '\u{1F44C}': 'OK', '\u{1F680}': 'ROCKET', '\u{2705}': 'DONE',
-  '\u{274C}': 'CROSS', '\u{1F4AF}': 'HUNDRED', '\u{26A1}': 'LIGHTNING',
-  '\u{1F3C6}': 'TROPHY', '\u{1F494}': 'BROKENHEART',
+  '\u{1F44D}': 'THUMBSUP', '\u{2764}': 'HEART', '\u{1F44F}': 'CLAP',
+  '\u{1F389}': 'PARTY', '\u{1F60A}': 'SMILE', '\u{1F914}': 'THINKING',
+  '\u{1F622}': 'CRY', '\u{1F44C}': 'OK', '\u{2705}': 'DONE',
+  '\u{1F4AA}': 'MUSCLE',
 }
 
 function resolveEmojiType(emoji: string): string {

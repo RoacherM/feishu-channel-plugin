@@ -419,25 +419,34 @@ function resolveEmojiType(emoji: string): string {
 // writeFile() which causes "socket connection closed" errors on Bun.
 // ---------------------------------------------------------------------------
 
-async function downloadResource(
-  msgId: string, fileKey: string, resourceType: 'image' | 'file' = 'image',
-): Promise<Buffer> {
-  const tokenResp = await client.request<{ code: number; tenant_access_token: string }>({
+let cachedToken: { token: string; expiresAt: number } | null = null
+
+async function getTenantToken(): Promise<string> {
+  if (cachedToken && Date.now() < cachedToken.expiresAt) return cachedToken.token
+  const resp = await client.request<{ code: number; tenant_access_token: string; expire: number }>({
     url: `${DOMAIN}/open-apis/auth/v3/tenant_access_token/internal`,
     method: 'POST',
     data: { app_id: APP_ID, app_secret: APP_SECRET },
   })
+  // expire is in seconds; refresh 60s early to avoid edge-case expiry
+  cachedToken = { token: resp.tenant_access_token, expiresAt: Date.now() + (resp.expire - 60) * 1000 }
+  return cachedToken.token
+}
+
+async function downloadResource(
+  msgId: string, fileKey: string, resourceType: 'image' | 'file' = 'image',
+): Promise<Buffer> {
+  const token = await getTenantToken()
   const dlUrl = `${DOMAIN}/open-apis/im/v1/messages/${msgId}/resources/${fileKey}?type=${resourceType}`
-  const dlResp = await fetch(dlUrl, {
-    headers: { Authorization: `Bearer ${tokenResp.tenant_access_token}` },
-  })
+  const dlResp = await fetch(dlUrl, { headers: { Authorization: `Bearer ${token}` } })
   if (!dlResp.ok) throw new Error(`download failed: HTTP ${dlResp.status}`)
   return Buffer.from(await dlResp.arrayBuffer())
 }
 
+mkdirSync(INBOX_DIR, { recursive: true })
+
 function saveToInbox(buf: Buffer, fileKey: string, ext: string): string {
   const path = join(INBOX_DIR, `${Date.now()}-${fileKey.slice(0, 16)}.${ext}`)
-  mkdirSync(INBOX_DIR, { recursive: true })
   writeFileSync(path, buf)
   return path
 }
@@ -1036,24 +1045,21 @@ wsClient.start({
             }
 
             case 'post': {
-              // Rich text — extract text and download embedded images
+              // Rich text — extract text and download embedded images in parallel
               try {
                 const locale = content.zh_cn ?? content.en_us ?? content.ja_jp ?? Object.values(content)[0] as any
                 if (locale?.content) {
                   const parts: string[] = []
                   if (locale.title) parts.push(locale.title)
-                  const embeddedImages: string[] = []
+
+                  // First pass: extract text and collect image keys with placeholders
+                  const imageKeys: string[] = []
                   for (const paragraph of locale.content) {
                     const lineParts: string[] = []
                     for (const node of paragraph as any[]) {
                       if (node.tag === 'img' && node.image_key) {
-                        try {
-                          const buf = await downloadResource(messageId, node.image_key, 'image')
-                          embeddedImages.push(saveToInbox(buf, node.image_key, 'png'))
-                          lineParts.push('(image)')
-                        } catch {
-                          lineParts.push(`(image: ${node.image_key})`)
-                        }
+                        imageKeys.push(node.image_key)
+                        lineParts.push('(image)')
                       } else {
                         const t = node.text ?? node.content ?? ''
                         if (t) lineParts.push(t)
@@ -1062,6 +1068,20 @@ wsClient.start({
                     parts.push(lineParts.join(''))
                   }
                   text = parts.join('\n')
+
+                  // Second pass: download all images in parallel
+                  const embeddedImages: string[] = []
+                  if (imageKeys.length > 0) {
+                    const results = await Promise.allSettled(
+                      imageKeys.map(async key => {
+                        const buf = await downloadResource(messageId, key, 'image')
+                        return saveToInbox(buf, key, 'png')
+                      }),
+                    )
+                    for (const r of results) {
+                      if (r.status === 'fulfilled') embeddedImages.push(r.value)
+                    }
+                  }
                   // Use first embedded image as imagePath; rest as attachments in text
                   if (embeddedImages.length > 0) {
                     imagePath = embeddedImages[0]

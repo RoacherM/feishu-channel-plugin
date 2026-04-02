@@ -1033,19 +1033,45 @@ wsClient.start({
             }
 
             case 'post': {
-              // Rich text — extract plain text from the structure
+              // Rich text — extract text and download embedded images
               try {
                 const locale = content.zh_cn ?? content.en_us ?? content.ja_jp ?? Object.values(content)[0] as any
                 if (locale?.content) {
                   const parts: string[] = []
                   if (locale.title) parts.push(locale.title)
+                  const embeddedImages: string[] = []
                   for (const paragraph of locale.content) {
-                    const line = paragraph
-                      .map((node: any) => node.text ?? node.content ?? '')
-                      .join('')
-                    parts.push(line)
+                    const lineParts: string[] = []
+                    for (const node of paragraph as any[]) {
+                      if (node.tag === 'img' && node.image_key) {
+                        try {
+                          const resp = await client.im.messageResource.get({
+                            params: { type: 'image' },
+                            path: { message_id: messageId, file_key: node.image_key },
+                          })
+                          const path = join(INBOX_DIR, `${Date.now()}-${node.image_key.slice(0, 16)}.png`)
+                          mkdirSync(INBOX_DIR, { recursive: true })
+                          await resp.writeFile(path)
+                          embeddedImages.push(path)
+                          lineParts.push('(image)')
+                        } catch {
+                          lineParts.push(`(image: ${node.image_key})`)
+                        }
+                      } else {
+                        const t = node.text ?? node.content ?? ''
+                        if (t) lineParts.push(t)
+                      }
+                    }
+                    parts.push(lineParts.join(''))
                   }
                   text = parts.join('\n')
+                  // Use first embedded image as imagePath; rest as attachments in text
+                  if (embeddedImages.length > 0) {
+                    imagePath = embeddedImages[0]
+                    for (let i = 1; i < embeddedImages.length; i++) {
+                      text += `\n(additional image: ${embeddedImages[i]})`
+                    }
+                  }
                 } else {
                   text = '(rich text)'
                 }

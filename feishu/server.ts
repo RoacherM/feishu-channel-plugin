@@ -415,6 +415,34 @@ function resolveEmojiType(emoji: string): string {
 }
 
 // ---------------------------------------------------------------------------
+// Media download helper — uses fetch+buffer instead of SDK's stream-based
+// writeFile() which causes "socket connection closed" errors on Bun.
+// ---------------------------------------------------------------------------
+
+async function downloadResource(
+  msgId: string, fileKey: string, resourceType: 'image' | 'file' = 'image',
+): Promise<Buffer> {
+  const tokenResp = await client.request<{ code: number; tenant_access_token: string }>({
+    url: `${DOMAIN}/open-apis/auth/v3/tenant_access_token/internal`,
+    method: 'POST',
+    data: { app_id: APP_ID, app_secret: APP_SECRET },
+  })
+  const dlUrl = `${DOMAIN}/open-apis/im/v1/messages/${msgId}/resources/${fileKey}?type=${resourceType}`
+  const dlResp = await fetch(dlUrl, {
+    headers: { Authorization: `Bearer ${tokenResp.tenant_access_token}` },
+  })
+  if (!dlResp.ok) throw new Error(`download failed: HTTP ${dlResp.status}`)
+  return Buffer.from(await dlResp.arrayBuffer())
+}
+
+function saveToInbox(buf: Buffer, fileKey: string, ext: string): string {
+  const path = join(INBOX_DIR, `${Date.now()}-${fileKey.slice(0, 16)}.${ext}`)
+  mkdirSync(INBOX_DIR, { recursive: true })
+  writeFileSync(path, buf)
+  return path
+}
+
+// ---------------------------------------------------------------------------
 // MCP server
 // ---------------------------------------------------------------------------
 
@@ -706,28 +734,10 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
       case 'download_attachment': {
         const messageId = args.message_id as string
         const fileKey = args.file_key as string
-        const resourceType = (args.type as string | undefined) ?? 'image'
-
-        // Use fetch + buffer instead of SDK's stream-based writeFile()
-        // to avoid "socket connection closed unexpectedly" errors caused by
-        // missing error handlers on the readable stream in the Lark SDK.
-        const tokenResp = await client.request<{ code: number; tenant_access_token: string }>({
-          url: `${larkDomain}/open-apis/auth/v3/tenant_access_token/internal`,
-          method: 'POST',
-          data: { app_id: APP_ID, app_secret: APP_SECRET },
-        })
-        const token = tokenResp.tenant_access_token
-        const dlUrl = `${larkDomain}/open-apis/im/v1/messages/${messageId}/resources/${fileKey}?type=${resourceType}`
-        const dlResp = await fetch(dlUrl, {
-          headers: { Authorization: `Bearer ${token}` },
-        })
-        if (!dlResp.ok) throw new Error(`download failed: HTTP ${dlResp.status} ${await dlResp.text()}`)
-        const buf = Buffer.from(await dlResp.arrayBuffer())
-
+        const resourceType = (args.type as 'image' | 'file' | undefined) ?? 'image'
+        const buf = await downloadResource(messageId, fileKey, resourceType)
         const ext = resourceType === 'image' ? 'png' : 'bin'
-        const path = join(INBOX_DIR, `${Date.now()}-${fileKey.slice(0, 16)}.${ext}`)
-        mkdirSync(INBOX_DIR, { recursive: true })
-        writeFileSync(path, buf)
+        const path = saveToInbox(buf, fileKey, ext)
         return { content: [{ type: 'text', text: path }] }
       }
 
@@ -994,16 +1004,9 @@ wsClient.start({
               text = '(image)'
               const imageKey = content.image_key
               if (imageKey) {
-                // Download image immediately for p2p from allowed senders
                 try {
-                  const resp = await client.im.messageResource.get({
-                    params: { type: 'image' },
-                    path: { message_id: messageId, file_key: imageKey },
-                  })
-                  const path = join(INBOX_DIR, `${Date.now()}-${imageKey.slice(0, 16)}.png`)
-                  mkdirSync(INBOX_DIR, { recursive: true })
-                  await resp.writeFile(path)
-                  imagePath = path
+                  const buf = await downloadResource(messageId, imageKey, 'image')
+                  imagePath = saveToInbox(buf, imageKey, 'png')
                 } catch (err) {
                   process.stderr.write(`feishu channel: image download failed: ${err}\n`)
                   attachment = { kind: 'image', file_key: imageKey }
@@ -1045,14 +1048,8 @@ wsClient.start({
                     for (const node of paragraph as any[]) {
                       if (node.tag === 'img' && node.image_key) {
                         try {
-                          const resp = await client.im.messageResource.get({
-                            params: { type: 'image' },
-                            path: { message_id: messageId, file_key: node.image_key },
-                          })
-                          const path = join(INBOX_DIR, `${Date.now()}-${node.image_key.slice(0, 16)}.png`)
-                          mkdirSync(INBOX_DIR, { recursive: true })
-                          await resp.writeFile(path)
-                          embeddedImages.push(path)
+                          const buf = await downloadResource(messageId, node.image_key, 'image')
+                          embeddedImages.push(saveToInbox(buf, node.image_key, 'png'))
                           lineParts.push('(image)')
                         } catch {
                           lineParts.push(`(image: ${node.image_key})`)

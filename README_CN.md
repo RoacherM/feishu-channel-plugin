@@ -75,7 +75,7 @@ claude --dangerously-load-development-channels plugin:feishu@feishu-plugin
 /feishu:upgrade status    # 检查是否有可用更新
 ```
 
-升级后需运行 `/plugin install feishu@feishu-plugin` 和 `/reload-plugins`。
+升级后运行 `/reload-plugins`，然后**退出并重新进入 Claude Code** 以使 MCP 服务器加载新代码。
 
 > **注意**：Claude Code 内置的 `/plugin update` 有[已知 bug](https://github.com/anthropics/claude-code/issues/37252)，不会在比较版本前拉取远端。请使用 `/feishu:upgrade` 代替。
 

@@ -73,7 +73,7 @@ Manage who can reach your bot:
 /feishu:upgrade status    # Check if updates are available
 ```
 
-After upgrading, run `/plugin install feishu@feishu-plugin` then `/reload-plugins`.
+After upgrading, run `/reload-plugins`, then **exit and re-enter Claude Code** for the MCP server to restart with the new code.
 
 > **Note**: Claude Code's built-in `/plugin update` has a [known bug](https://github.com/anthropics/claude-code/issues/37252) that doesn't fetch the remote before comparing versions. Use `/feishu:upgrade` instead.
 

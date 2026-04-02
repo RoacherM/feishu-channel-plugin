@@ -11,8 +11,8 @@ allowed-tools:
 
 # /feishu:configure — Feishu Channel Setup
 
-Writes the App ID and App Secret to `~/.claude/channels/feishu/.env` and
-orients the user on access policy. The server reads the file at boot.
+Write the App ID and App Secret to `~/.claude/channels/feishu/.env` and
+orient the user on access policy. The server reads the file at boot.
 
 Arguments passed: `$ARGUMENTS`
 

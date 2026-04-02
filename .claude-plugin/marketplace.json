@@ -9,7 +9,7 @@
     {
       "name": "feishu",
       "description": "Feishu/Lark channel for Claude Code — messaging bridge with built-in access control",
-      "version": "0.2.0",
+      "version": "0.2.2",
       "source": "./feishu"
     }
   ]

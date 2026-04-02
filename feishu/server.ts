@@ -163,7 +163,7 @@ type Access = {
 }
 
 function defaultAccess(): Access {
-  return { dmPolicy: 'pairing', allowFrom: [], groups: {}, pending: {}, ackReaction: 'EYES' }
+  return { dmPolicy: 'pairing', allowFrom: [], groups: {}, pending: {}, ackReaction: 'OK' }
 }
 
 const MAX_CHUNK_LIMIT = 4000  // Feishu text message limit is ~4000 chars

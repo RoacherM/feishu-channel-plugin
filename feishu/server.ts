@@ -764,6 +764,46 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
 await mcp.connect(new StdioServerTransport())
 
 // ---------------------------------------------------------------------------
+// Delivery queue — per-chat ordering, post-success dedup
+// ---------------------------------------------------------------------------
+
+const deliveryChains = new Map<string, Promise<void>>()
+
+const deliveredMessages = new Set<string>()
+const DEDUP_TTL = 30 * 60_000
+setInterval(() => {
+  if (deliveredMessages.size > 500) deliveredMessages.clear()
+}, DEDUP_TTL)
+
+function enqueueDelivery(
+  chatId: string,
+  messageId: string,
+  notification: Parameters<typeof mcp.notification>[0],
+): void {
+  const dedupKey = `${chatId}:${messageId}`
+  if (messageId && deliveredMessages.has(dedupKey)) {
+    process.stderr.write(`feishu channel: dedup skip ${messageId}\n`)
+    return
+  }
+
+  const prev = deliveryChains.get(chatId) ?? Promise.resolve()
+  const next = prev.then(async () => {
+    try {
+      await mcp.notification(notification)
+      if (messageId) deliveredMessages.add(dedupKey)
+      process.stderr.write(`feishu channel: delivered ${messageId || '(no-id)'}\n`)
+    } catch (err) {
+      process.stderr.write(`feishu channel: FAILED to deliver ${messageId || '(no-id)'}: ${err}\n`)
+    }
+  })
+  deliveryChains.set(chatId, next)
+
+  next.then(() => {
+    if (deliveryChains.get(chatId) === next) deliveryChains.delete(chatId)
+  })
+}
+
+// ---------------------------------------------------------------------------
 // Shutdown
 // ---------------------------------------------------------------------------
 
@@ -858,7 +898,7 @@ async function handleInbound(
     void client.im.messageReaction.create({
       data: { reaction_type: { emoji_type: emojiType } },
       path: { message_id: messageId },
-    }).catch(() => {})
+    }).catch(e => process.stderr.write(`feishu channel: permission ack failed: ${e}\n`))
     return
   }
 
@@ -868,11 +908,11 @@ async function handleInbound(
     void client.im.messageReaction.create({
       data: { reaction_type: { emoji_type: emojiType } },
       path: { message_id: messageId },
-    }).catch(() => {})
+    }).catch(e => process.stderr.write(`feishu channel: ack reaction failed: ${e}\n`))
   }
 
-  // Deliver to Claude Code
-  mcp.notification({
+  // Deliver to Claude Code via ordered queue
+  enqueueDelivery(chatId, messageId, {
     method: 'notifications/claude/channel',
     params: {
       content: text,
@@ -892,8 +932,6 @@ async function handleInbound(
         } : {}),
       },
     },
-  }).catch(err => {
-    process.stderr.write(`feishu channel: failed to deliver inbound to Claude: ${err}\n`)
   })
 }
 

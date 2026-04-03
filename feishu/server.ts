@@ -114,15 +114,19 @@ process.on('uncaughtException', err => {
 
 // Custom logger that writes to stderr — the default logger writes to stdout,
 // which corrupts the MCP stdio transport (JSON-RPC over stdin/stdout).
+// Also tracks last SDK activity timestamp for WebSocket health monitoring —
+// the SDK logs heartbeats, connection events, and pings through this logger.
+let lastSdkActivityAt = Date.now()
+
 const stderrLogger = {
-  fatal: (...args: any[]) => process.stderr.write(`[fatal] ${args.map(String).join(' ')}\n`),
-  error: (...args: any[]) => process.stderr.write(`[error] ${args.map(String).join(' ')}\n`),
-  warn: (...args: any[]) => process.stderr.write(`[warn] ${args.map(String).join(' ')}\n`),
-  info: (..._args: any[]) => {},   // suppress — too noisy for MCP
-  debug: (..._args: any[]) => {},
-  trace: (..._args: any[]) => {},
+  fatal: (...args: any[]) => { lastSdkActivityAt = Date.now(); process.stderr.write(`[fatal] ${args.map(String).join(' ')}\n`) },
+  error: (...args: any[]) => { lastSdkActivityAt = Date.now(); process.stderr.write(`[error] ${args.map(String).join(' ')}\n`) },
+  warn: (...args: any[]) => { lastSdkActivityAt = Date.now(); process.stderr.write(`[warn] ${args.map(String).join(' ')}\n`) },
+  info: (..._args: any[]) => { lastSdkActivityAt = Date.now() },
+  debug: (..._args: any[]) => { lastSdkActivityAt = Date.now() },
+  trace: (..._args: any[]) => { lastSdkActivityAt = Date.now() },
   // Some SDK internals call log() directly
-  log: (..._args: any[]) => {},
+  log: (..._args: any[]) => { lastSdkActivityAt = Date.now() },
 }
 
 const larkDomain = DOMAIN.includes('larksuite') ? lark.Domain.Lark : lark.Domain.Feishu
@@ -851,7 +855,11 @@ function loadDedupFromDisk(): void {
       if (ts >= cutoff) deliveredMessages.set(key, ts)
     }
     process.stderr.write(`feishu channel: loaded ${deliveredMessages.size} dedup entries from disk\n`)
-  } catch {}
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException).code !== 'ENOENT') {
+      process.stderr.write(`feishu channel: failed to load dedup cache (starting fresh): ${err}\n`)
+    }
+  }
 }
 
 function saveDedupToDisk(): void {
@@ -886,6 +894,11 @@ function enqueueDelivery(
     return
   }
 
+  // Mark as pending immediately to prevent duplicate enqueues from concurrent events.
+  // Timestamp is updated to actual delivery time on success; on failure the entry
+  // is removed so retries can re-enqueue.
+  if (messageId) deliveredMessages.set(dedupKey, Date.now())
+
   const prev = deliveryChains.get(chatId) ?? Promise.resolve()
   const next = prev.then(async () => {
     try {
@@ -893,6 +906,7 @@ function enqueueDelivery(
       if (messageId) deliveredMessages.set(dedupKey, Date.now())
       process.stderr.write(`feishu channel: delivered ${messageId || '(no-id)'}\n`)
     } catch (err) {
+      if (messageId) deliveredMessages.delete(dedupKey)
       process.stderr.write(`feishu channel: FAILED to deliver ${messageId || '(no-id)'}: ${err}\n`)
     }
   })
@@ -1045,13 +1059,13 @@ async function handleInbound(
 // WSClient — Feishu long connection event subscription with health monitoring
 // ---------------------------------------------------------------------------
 
-// Track last event time for health monitoring
+// Health check: track both SDK-level activity (heartbeats, pings logged through
+// stderrLogger) and inbound user messages. Only restart if BOTH are silent —
+// this avoids false positives on idle-but-connected bots.
 let lastEventAt = Date.now()
 
-// Health check interval — if no events received for this long, restart WSClient.
-// Feishu sends heartbeats roughly every 60s; 5 minutes of silence is clearly dead.
-const WS_HEALTH_TIMEOUT = 5 * 60_000
-const WS_HEALTH_CHECK_INTERVAL = 60_000
+const WS_HEALTH_TIMEOUT = 5 * 60_000       // 5 minutes of total silence = dead
+const WS_HEALTH_CHECK_INTERVAL = 60_000     // check every minute
 
 let wsClient = new lark.WSClient({
   appId: APP_ID,
@@ -1217,32 +1231,38 @@ function restartWsClient(): void {
     loggerLevel: lark.LoggerLevel.error,
     logger: stderrLogger as any,
   })
-  lastEventAt = Date.now()
+  const now = Date.now()
+  lastEventAt = now
+  lastSdkActivityAt = now
   wsClient.start({ eventDispatcher: buildEventDispatcher() })
   process.stderr.write('feishu channel: WSClient restarted\n')
 }
 
-// Attempt initial fetch — if it fails, retry in background with exponential backoff.
-// Don't block startup: the server can still process DM events without botOpenId.
-const botIdOk = await fetchBotOpenId()
-if (!botIdOk) {
-  process.stderr.write('feishu channel: bot open_id fetch failed — group mention detection degraded, retrying in background\n')
-  retryBotOpenId()
-}
-
+// Start accepting events immediately — don't block on bot info fetch.
 wsClient.start({ eventDispatcher: buildEventDispatcher() })
+
+// Fetch bot open_id in background. If it fails, retry with exponential backoff.
+// Group mention detection degrades until open_id is available, but DMs still work.
+fetchBotOpenId().then(ok => {
+  if (!ok) {
+    process.stderr.write('feishu channel: bot open_id fetch failed — group mention detection degraded, retrying in background\n')
+    retryBotOpenId()
+  }
+})
 
 process.stderr.write(`feishu channel: WSClient started, listening for events\n`)
 
 // Health monitor — detect silent connection drops and restart WSClient.
-// Feishu's SDK sends internal heartbeats; if we receive nothing for 5 minutes,
-// the connection is likely dead.
+// Uses TWO signals: SDK logger activity (heartbeats, pings) AND inbound user messages.
+// Only restarts if BOTH are silent, avoiding false positives on idle-but-connected bots.
 const wsHealthCheck = setInterval(() => {
   if (shuttingDown) return
-  const silence = Date.now() - lastEventAt
+  const now = Date.now()
+  const lastActivity = Math.max(lastEventAt, lastSdkActivityAt)
+  const silence = now - lastActivity
   if (silence > WS_HEALTH_TIMEOUT) {
     process.stderr.write(
-      `feishu channel: no events for ${(silence / 1000).toFixed(0)}s — connection likely dead, restarting\n`,
+      `feishu channel: no SDK or message activity for ${(silence / 1000).toFixed(0)}s — connection likely dead, restarting\n`,
     )
     try {
       restartWsClient()

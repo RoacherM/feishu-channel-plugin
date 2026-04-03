@@ -135,10 +135,13 @@ const client = new lark.Client({
   logger: stderrLogger as any,
 })
 
-// Bot's open_id — fetched at startup for group mention detection
+// Bot's open_id — fetched at startup for group mention detection.
+// Retries in background with exponential backoff if initial fetch fails.
 let botOpenId = ''
 
-async function fetchBotOpenId(): Promise<void> {
+const BOT_ID_BACKOFF = [60_000, 120_000, 300_000, 600_000, 900_000] // 1m, 2m, 5m, 10m, 15m
+
+async function fetchBotOpenId(): Promise<boolean> {
   try {
     const resp = await client.request<{
       code: number
@@ -150,12 +153,28 @@ async function fetchBotOpenId(): Promise<void> {
     if (resp?.bot?.open_id) {
       botOpenId = resp.bot.open_id
       process.stderr.write(`feishu channel: bot open_id = ${botOpenId}\n`)
-    } else {
-      process.stderr.write(`feishu channel: bot info response missing open_id: ${JSON.stringify(resp)}\n`)
+      return true
     }
+    process.stderr.write(`feishu channel: bot info response missing open_id: ${JSON.stringify(resp)}\n`)
+    return false
   } catch (err) {
-    process.stderr.write(`feishu channel: failed to fetch bot info (group mention detection may not work): ${err}\n`)
+    process.stderr.write(`feishu channel: failed to fetch bot info: ${err}\n`)
+    return false
   }
+}
+
+function retryBotOpenId(): void {
+  let attempt = 0
+  const retry = () => {
+    const delay = BOT_ID_BACKOFF[Math.min(attempt, BOT_ID_BACKOFF.length - 1)]
+    const timer = setTimeout(async () => {
+      attempt++
+      const ok = await fetchBotOpenId()
+      if (!ok && !shuttingDown) retry()
+    }, delay)
+    timer.unref()
+  }
+  retry()
 }
 
 // ---------------------------------------------------------------------------
@@ -814,18 +833,46 @@ mcp.setRequestHandler(CallToolRequestSchema, async req => {
 await mcp.connect(new StdioServerTransport())
 
 // ---------------------------------------------------------------------------
-// Delivery queue — per-chat ordering, post-success dedup
+// Delivery queue — per-chat ordering, post-success dedup (disk-backed)
 // ---------------------------------------------------------------------------
 
 const deliveryChains = new Map<string, Promise<void>>()
 
 const deliveredMessages = new Map<string, number>()
 const DEDUP_TTL = 30 * 60_000
+const DEDUP_FILE = join(STATE_DIR, 'dedup.json')
+
+function loadDedupFromDisk(): void {
+  try {
+    const raw = readFileSync(DEDUP_FILE, 'utf8')
+    const entries = JSON.parse(raw) as Array<[string, number]>
+    const cutoff = Date.now() - DEDUP_TTL
+    for (const [key, ts] of entries) {
+      if (ts >= cutoff) deliveredMessages.set(key, ts)
+    }
+    process.stderr.write(`feishu channel: loaded ${deliveredMessages.size} dedup entries from disk\n`)
+  } catch {}
+}
+
+function saveDedupToDisk(): void {
+  try {
+    const entries = Array.from(deliveredMessages.entries())
+    const tmp = DEDUP_FILE + '.tmp'
+    writeFileSync(tmp, JSON.stringify(entries), { mode: 0o600 })
+    renameSync(tmp, DEDUP_FILE)
+  } catch (err) {
+    process.stderr.write(`feishu channel: failed to save dedup cache: ${err}\n`)
+  }
+}
+
+loadDedupFromDisk()
+
 const dedupCleanupInterval = setInterval(() => {
   const cutoff = Date.now() - DEDUP_TTL
   for (const [key, ts] of deliveredMessages) {
     if (ts < cutoff) deliveredMessages.delete(key)
   }
+  saveDedupToDisk()
 }, DEDUP_TTL)
 
 function enqueueDelivery(
@@ -865,6 +912,7 @@ function shutdown(): void {
   if (shuttingDown) return
   shuttingDown = true
   clearInterval(dedupCleanupInterval)
+  saveDedupToDisk()
   try {
     const current = readFileSync(PID_FILE, 'utf8').trim()
     if (current === PID_ENTRY) rmSync(PID_FILE)
@@ -950,9 +998,9 @@ async function handleInbound(
         request_id: permMatch[2]!.toLowerCase(),
         behavior: permMatch[1]!.toLowerCase().startsWith('y') ? 'allow' : 'deny',
       },
-    })
-    // React with check/cross
-    const emojiType = permMatch[1]!.toLowerCase().startsWith('y') ? 'DONE' : 'CROSS'
+    }).catch(e => process.stderr.write(`feishu channel: permission notification failed: ${e}\n`))
+    // React with check/cry — CROSS is unsupported by Feishu's reaction API (error 231001)
+    const emojiType = permMatch[1]!.toLowerCase().startsWith('y') ? 'DONE' : 'CRY'
     void client.im.messageReaction.create({
       data: { reaction_type: { emoji_type: emojiType } },
       path: { message_id: messageId },
@@ -994,10 +1042,18 @@ async function handleInbound(
 }
 
 // ---------------------------------------------------------------------------
-// WSClient — Feishu long connection event subscription
+// WSClient — Feishu long connection event subscription with health monitoring
 // ---------------------------------------------------------------------------
 
-const wsClient = new lark.WSClient({
+// Track last event time for health monitoring
+let lastEventAt = Date.now()
+
+// Health check interval — if no events received for this long, restart WSClient.
+// Feishu sends heartbeats roughly every 60s; 5 minutes of silence is clearly dead.
+const WS_HEALTH_TIMEOUT = 5 * 60_000
+const WS_HEALTH_CHECK_INTERVAL = 60_000
+
+let wsClient = new lark.WSClient({
   appId: APP_ID,
   appSecret: APP_SECRET,
   domain: larkDomain,
@@ -1005,12 +1061,10 @@ const wsClient = new lark.WSClient({
   logger: stderrLogger as any,
 })
 
-// Must complete before accepting events — otherwise mention detection fails on early messages
-await fetchBotOpenId()
-
-wsClient.start({
-  eventDispatcher: new lark.EventDispatcher({}).register({
+function buildEventDispatcher(): lark.EventDispatcher {
+  return new lark.EventDispatcher({}).register({
     'im.message.receive_v1': async (data: any) => {
+      lastEventAt = Date.now()
       try {
         const sender = data.sender
         const message = data.message
@@ -1150,12 +1204,54 @@ wsClient.start({
         process.stderr.write(`feishu channel: event handler error: ${err}\n`)
       }
     },
-  }),
-})
+  })
+}
+
+function restartWsClient(): void {
+  process.stderr.write('feishu channel: restarting WSClient...\n')
+  try { wsClient.close({ force: true }) } catch {}
+  wsClient = new lark.WSClient({
+    appId: APP_ID!,
+    appSecret: APP_SECRET!,
+    domain: larkDomain,
+    loggerLevel: lark.LoggerLevel.error,
+    logger: stderrLogger as any,
+  })
+  lastEventAt = Date.now()
+  wsClient.start({ eventDispatcher: buildEventDispatcher() })
+  process.stderr.write('feishu channel: WSClient restarted\n')
+}
+
+// Attempt initial fetch — if it fails, retry in background with exponential backoff.
+// Don't block startup: the server can still process DM events without botOpenId.
+const botIdOk = await fetchBotOpenId()
+if (!botIdOk) {
+  process.stderr.write('feishu channel: bot open_id fetch failed — group mention detection degraded, retrying in background\n')
+  retryBotOpenId()
+}
+
+wsClient.start({ eventDispatcher: buildEventDispatcher() })
 
 process.stderr.write(`feishu channel: WSClient started, listening for events\n`)
 
-// Keepalive — WSClient's WebSocket alone may not keep the event loop alive
-// if the connection drops. This interval ensures the process stays running
-// as long as Claude Code holds stdin open.
+// Health monitor — detect silent connection drops and restart WSClient.
+// Feishu's SDK sends internal heartbeats; if we receive nothing for 5 minutes,
+// the connection is likely dead.
+const wsHealthCheck = setInterval(() => {
+  if (shuttingDown) return
+  const silence = Date.now() - lastEventAt
+  if (silence > WS_HEALTH_TIMEOUT) {
+    process.stderr.write(
+      `feishu channel: no events for ${(silence / 1000).toFixed(0)}s — connection likely dead, restarting\n`,
+    )
+    try {
+      restartWsClient()
+    } catch (err) {
+      process.stderr.write(`feishu channel: WSClient restart failed: ${err}\n`)
+    }
+  }
+}, WS_HEALTH_CHECK_INTERVAL)
+wsHealthCheck.unref()
+
+// Keepalive — ensures the process stays running as long as Claude Code holds stdin open.
 setInterval(() => {}, 30_000)
